@@ -13,38 +13,63 @@ from sklearn.feature_extraction.text import CountVectorizer
 try:
     clf = pickle.load(open("Artifacts/nlp_model.pkl", 'rb'))
     vectorizer = pickle.load(open("Artifacts/tranform.pkl",'rb'))
-except:
-    print("Error in loading Artifacts")
+    data = pd.read_csv('Artifacts/main_data.csv')
+    
+    # creating a similarity matrix using count vectorizer and cosine similarity
+    def create_similarity():
+        try:
+            cv = CountVectorizer()
+            count_matrix = cv.fit_transform(data['comb']) 
+            similarity = cosine_similarity(count_matrix)
+            return data, similarity
+        except Exception as e:
+            print(e)
+            return None, None
 
-# creating a similarity matrix using count vectorizer and cosine similarity
-def create_similarity():
-    try:
-        data = pd.read_csv("Artifacts/main_data.csv")
-        cv = CountVectorizer()
-        count_matrix = cv.fit_transform(data['comb']) 
-        similarity = cosine_similarity(count_matrix)
-        return data,similarity
-    except Exception as e:
-        print(e)
+    # Global data and similarity for use in recommendations
+    similarity_data, similarity_matrix = create_similarity()
+    
+    print("Models and data loaded successfully")
+except FileNotFoundError:
+    print("Model files not found - running in demo mode")
+    clf = None
+    vectorizer = None
+    data = None
+    similarity_data = None
+    similarity_matrix = None
+except Exception as e:
+    print(f"Error in loading Artifacts: {e}")
+    clf = None
+    vectorizer = None
+    data = None
+    similarity_data = None
+    similarity_matrix = None
 
 def rcmd(m):
     m = m.lower()
-    try:
-        data.head()
-        similarity.shape 
-    except:
-        data, similarity = create_similarity()
-    if m not in data['movie_title'].unique():
-        return('Sorry! The movie you requested is not in our database. Please check the spelling or try with some other movies')
+    global similarity_data, similarity_matrix
+    
+    # Check if models are loaded
+    if similarity_data is None or similarity_matrix is None:
+        # Return sample recommendations for demo purposes
+        sample_movies = [
+            "The Shawshank Redemption", "The Godfather", "The Dark Knight", 
+            "Pulp Fiction", "Forrest Gump", "Inception", "The Matrix", 
+            "Goodfellas", "Interstellar", "Parasite"
+        ]
+        return sample_movies[:10]
+    
+    if m not in similarity_data['movie_title'].unique():
+        return(['Sorry! The movie you requested is not in our database. Please check the spelling or try with some other movies'])
     else:
-        i = data.loc[data['movie_title']==m].index[0]
-        lst = list(enumerate(similarity[i]))
+        i = similarity_data.loc[similarity_data['movie_title']==m].index[0]
+        lst = list(enumerate(similarity_matrix[i]))
         lst = sorted(lst, key = lambda x:x[1] ,reverse=True)
         lst = lst[1:11] # excluding first item since it is the requested movie itself
         l = []
         for i in range(len(lst)):
             a = lst[i][0]
-            l.append(data['movie_title'][a])
+            l.append(similarity_data['movie_title'][a])
         return l
     
 # converting list of string to list (eg. "["abc","def"]" to ["abc","def"])
@@ -55,8 +80,19 @@ def convert_to_list(my_list):
     return my_list
 
 def get_suggestions():
-    data = pd.read_csv('Artifacts/main_data.csv')
-    return list(data['movie_title'].str.capitalize())
+    global similarity_data
+    if similarity_data is not None:
+        return list(similarity_data['movie_title'].str.capitalize())
+    else:
+        # Return sample suggestions for demo purposes
+        sample_movies = [
+            "The Shawshank Redemption", "The Godfather", "The Dark Knight", 
+            "Pulp Fiction", "Forrest Gump", "Inception", "The Matrix", 
+            "Goodfellas", "Interstellar", "Parasite", "Titanic", "Avatar",
+            "Avengers", "Star Wars", "Jurassic Park", "Shrek", "Toy Story",
+            "Finding Nemo", "Up", "Inside Out"
+        ]
+        return sample_movies
 
 app = Flask(__name__)
 
@@ -64,19 +100,20 @@ app = Flask(__name__)
 @app.route("/home")
 def home():
     suggestions = get_suggestions()
-    return render_template('home.html',suggestions=suggestions)
+    return render_template('home.html', suggestions=suggestions)
 
-@app.route("/similarity",methods=["POST"])
+@app.route("/similarity", methods=["POST"])
 def similarity():
     movie = request.form['name']
     rc = rcmd(movie)
-    if type(rc)==type('string'):
+    if isinstance(rc, str) or (isinstance(rc, list) and len(rc) > 0 and isinstance(rc[0], str) and 
+                               rc[0].startswith('Sorry')):
         return rc
     else:
-        m_str="---".join(rc)
+        m_str = "---".join(rc)
         return m_str
 
-@app.route("/recommend",methods=["POST"])
+@app.route("/recommend", methods=["POST"])
 def recommend():
     # getting data from AJAX request
     title = request.form['title']
@@ -128,29 +165,40 @@ def recommend():
 
     cast_details = {cast_names[i]:[cast_ids[i], cast_profiles[i], cast_bdays[i], cast_places[i], cast_bios[i]] for i in range(len(cast_places))}
 
+    # Skip web scraping and reviews processing if models aren't loaded
+    if clf is None or vectorizer is None:
+        # Return basic info without reviews
+        return render_template('recommend.html', title=title, poster=poster, overview=overview, vote_average=vote_average,
+            vote_count=vote_count, release_date=release_date, runtime=runtime, status=status, genres=genres,
+            movie_cards=movie_cards, reviews={}, casts=casts, cast_details=cast_details)
+    
     # web scraping to get user reviews from IMDB site
-    sauce = urllib.request.urlopen('https://www.imdb.com/title/{}/reviews?ref_=tt_ov_rt'.format(imdb_id)).read()
-    soup = bs.BeautifulSoup(sauce,'lxml')
-    soup_result = soup.find_all("div",{"class":"text show-more__control"})
+    try:
+        sauce = urllib.request.urlopen('https://www.imdb.com/title/{}/reviews?ref_=tt_ov_rt'.format(imdb_id)).read()
+        soup = bs.BeautifulSoup(sauce,'lxml')
+        soup_result = soup.find_all("div",{"class":"text show-more__control"})
 
-    reviews_list = [] # list of reviews
-    reviews_status = [] # list of comments (good or bad)
-    for reviews in soup_result:
-        if reviews.string:
-            reviews_list.append(reviews.string)
-            # passing the review to our model
-            movie_review_list = np.array([reviews.string])
-            movie_vector = vectorizer.transform(movie_review_list)
-            pred = clf.predict(movie_vector)
-            reviews_status.append('Good' if pred else 'Bad')
+        reviews_list = [] # list of reviews
+        reviews_status = [] # list of comments (good or bad)
+        for reviews in soup_result:
+            if reviews.string:
+                reviews_list.append(reviews.string)
+                # passing the review to our model
+                movie_review_list = np.array([reviews.string])
+                movie_vector = vectorizer.transform(movie_review_list)
+                pred = clf.predict(movie_vector)
+                reviews_status.append('Good' if pred else 'Bad')
 
-    # combining reviews and comments into a dictionary
-    movie_reviews = {reviews_list[i]: reviews_status[i] for i in range(len(reviews_list))}     
+        # combining reviews and comments into a dictionary
+        movie_reviews = {reviews_list[i]: reviews_status[i] for i in range(len(reviews_list))}     
+    except:
+        # If scraping fails, return empty reviews
+        movie_reviews = {}
 
     # passing all the data to the html file
-    return render_template('recommend.html',title=title,poster=poster,overview=overview,vote_average=vote_average,
-        vote_count=vote_count,release_date=release_date,runtime=runtime,status=status,genres=genres,
-        movie_cards=movie_cards,reviews=movie_reviews,casts=casts,cast_details=cast_details)
+    return render_template('recommend.html', title=title, poster=poster, overview=overview, vote_average=vote_average,
+        vote_count=vote_count, release_date=release_date, runtime=runtime, status=status, genres=genres,
+        movie_cards=movie_cards, reviews=movie_reviews, casts=casts, cast_details=cast_details)
 
 if __name__ == '__main__':
     import os
