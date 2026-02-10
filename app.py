@@ -5,6 +5,7 @@ import bs4 as bs
 import numpy as np
 import pandas as pd
 import urllib.request
+import os
 from flask import Flask, render_template, request
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
@@ -94,7 +95,9 @@ def get_suggestions():
         ]
         return sample_movies
 
-app = Flask(__name__)
+import os
+template_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
+app = Flask(__name__, template_folder=template_dir)
 
 @app.route("/")
 @app.route("/home")
